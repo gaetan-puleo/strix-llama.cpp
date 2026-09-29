@@ -2635,7 +2635,29 @@ static bool ggml_cuda_graph_check_compability(ggml_cgraph * cgraph) {
 }
 
 static const void * ggml_cuda_graph_get_key(ggml_cgraph * cgraph) {
-    return cgraph->nodes[0];
+    // strixllama: fold the graph's shape into the key. One context alternates between batch shapes on the
+    // same first node (the MTP draft's catch-up at 1+n_draft tokens then its draft steps at 1, the
+    // target at 1+n_draft), and keying on the first node alone made every switch look like a property
+    // change: warmup reset, the next graph run direct, the one after captured again. With the shape in
+    // the key each shape keeps its own instance and replays. The value is only ever a map key.
+    // STRIX_GRAPH_KEY_SHAPE=0 restores the first-node key.
+    static const bool by_shape = [] {
+        const char * e = getenv("STRIX_GRAPH_KEY_SHAPE");
+        return !e || atoi(e) != 0;
+    }();
+    if (!by_shape || cgraph->n_nodes == 0) {
+        return cgraph->nodes[0];
+    }
+    uint64_t h = (uint64_t) (uintptr_t) cgraph->nodes[0];
+    h ^= (uint64_t) cgraph->n_nodes * 0x9E3779B97F4A7C15ull;
+    for (int i = 0; i < cgraph->n_nodes; ++i) {
+        const ggml_tensor * t = cgraph->nodes[i];
+        h = (h ^ (uint64_t) t->op) * 0x100000001B3ull;
+        for (int d = 0; d < GGML_MAX_DIMS; ++d) {
+            h = (h ^ (uint64_t) t->ne[d]) * 0x100000001B3ull;
+        }
+    }
+    return (const void *) (uintptr_t) h;
 }
 
 static ggml_cuda_graph::node_properties ggml_cuda_graph_node_props(const ggml_tensor * node) {
@@ -2663,10 +2685,9 @@ static bool ggml_cuda_graph_verify_uid() {
 }
 
 // see docs/development/backend-scheduler.md
-static bool ggml_cuda_graph_update_required(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph * cgraph) {
+static bool ggml_cuda_graph_update_required(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph * cgraph, const void * graph_key) {
     bool res = false;
 
-    const void * graph_key = ggml_cuda_graph_get_key(cgraph);
     ggml_cuda_graph * graph = cuda_ctx->cuda_graph(graph_key);
 
     if (cgraph->uid != 0 &&
@@ -6496,7 +6517,7 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend, 
     if (graph->is_enabled()) {
         const bool graph_compatible = ggml_cuda_graph_check_compability(cgraph);
         if (graph_compatible) {
-            const bool properties_changed = ggml_cuda_graph_update_required(cuda_ctx, cgraph);
+            const bool properties_changed = ggml_cuda_graph_update_required(cuda_ctx, cgraph, graph_key);
 
             if (!graph->warmup_complete) {
                 // Warmup: need at least 2 calls with no property change on the 2nd call
