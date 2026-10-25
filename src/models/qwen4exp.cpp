@@ -1065,16 +1065,16 @@ static int64_t qwen4exp_query_strip(int64_t n_tokens, int64_t n_stream) {
 }
 
 // The strip the indexer scores with. The raw score is F32 [n_blocks, n_idx_h, strip] and its ReLU is a second tensor
-// of that size, so a fixed strip grows the scratch with the context: 2 x 2 GiB at n_kv = 1M. Halve the strip (rounding
+// of that size, so a fixed strip grows the scratch with the context: 2 x 2 GiB at n_kv = 1M (4 x 65536 blocks x 4 heads x 1024
+// queries x 4 B = 4 GiB each with four 262144-token streams and -ub 4096, which scored their whole ubatch at once). Halve the strip (rounding
 // up) while the raw score exceeds 2^27 elements (its size at n_kv = 262144, 512 MiB), down to 64 queries. The
 // last-layer trim aligns q_first to qwen4exp_query_strip: a 512 strip halves to powers of two, which divide it, and a
 // shorter ubatch has q_first = 0.
 static int64_t qwen4exp_score_strip(int64_t n_tokens, int64_t n_stream, int64_t n_blocks, int64_t n_idx_h) {
     int64_t strip = qwen4exp_query_strip(n_tokens, n_stream);
-    if (n_stream != 1) {
-        return strip;
-    }
-    while (strip >= 128 && n_blocks * n_idx_h * strip > ((int64_t) 1 << 27)) {
+    // split KV streams score all streams in one GEMM per strip ([n_blocks, n_idx_h * strip, n_stream]): the bound
+    // counts them all. Their selection never trims the first queries (q_first = 0), so any strip divides it.
+    while (strip >= 128 && n_stream * n_blocks * n_idx_h * strip > ((int64_t) 1 << 27)) {
         strip = (strip + 1) / 2;
     }
     return strip;
