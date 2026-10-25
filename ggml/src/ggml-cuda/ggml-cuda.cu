@@ -6892,7 +6892,10 @@ static void ggml_cuda_ovl_plan(ggml_backend_cuda_context * ctx, ggml_cgraph * cg
             const int iu = find(i - 2, i + 4,   [&](const ggml_tensor * u) { return u->op == GGML_OP_MUL_MAT && name_is(u, "ffn_up", sfx); });
             const int ig = find(i + 1, i + 80,  [&](const ggml_tensor * u) { return u->op == GGML_OP_MUL_MAT && name_is(u, "shared_expert_gate", sfx); });
             const int b  = find(i + 1, i + 120, [&](const ggml_tensor * u) { return u->op == GGML_OP_MUL && name_is(u, "ffn_moe_weighted", sfx); });
-            if (iu >= 0 && ig >= 0 && b >= 0 && ig < b && iu < b) {
+            // a MUL feeding the weighted node (per-expert down scale) starts the fused weighted reduction that also covers
+            // the end node: the group would cross the join
+            auto scaled = [&](const ggml_tensor * u) { return u && u->op == GGML_OP_MUL; };
+            if (iu >= 0 && ig >= 0 && b >= 0 && ig < b && iu < b && !scaled(cg->nodes[b]->src[0]) && !scaled(cg->nodes[b]->src[1])) {
                 cands.push_back({ std::min(i, iu), b, { t, cg->nodes[iu], cg->nodes[ig] }, 2, false });
             }
         } else if (name_is(t, "Vcur", sfx)) {
