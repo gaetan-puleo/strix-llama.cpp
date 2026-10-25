@@ -1920,11 +1920,11 @@ static void ggml_cuda_op_gated_delta_net_impl(
             // z stored BF16-only (ggml_cuda_gdn_z16_ok, a graph-time choice) is read natively only by the v2 epilogue: when the
             // run-time checks above still refuse v2, the chunked scan below reads an F32 copy instead
             const bool z_widen = on_ovr.z_bf16 && !use_v2;
-            // F32 norm output with several sequences: the scans run one sequence after the other, and sequence i's rows
-            // may land on inputs of sequence j > i that the allocator freed after this node: stage them, copy at the end
+            // F32 norm output (v1 scan): it is written while inputs freed by the allocator after this node are still read
+            // (later sequences' inputs, the initial state of head blocks not yet resident): stage it, copy at the end
             ggml_cuda_pool_alloc<float> out_stage(ctx.pool());
             float * out_base = on_ovr.out;
-            if (n_seqs > 1 && on_ovr.out && !use_v2) {
+            if (on_ovr.out && !use_v2) {
                 out_stage.alloc((size_t) n_seqs * n_tokens * H * 128);
                 out_base = out_stage.get();
             }
